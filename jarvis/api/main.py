@@ -1662,12 +1662,6 @@ _INSTANT_RESPONSES: dict[str, list[str]] = {
     "i'm bored": ["Boredom is just untapped potential. What shall we build?"],
     "motivate me": ["You didn't come this far to only come this far."],
 
-    # ── Time ──
-    "what time is it": [f"It's {__import__('time').strftime('%I:%M %p')}."],
-    "what's the time": [f"It's {__import__('time').strftime('%I:%M %p')}."],
-    "whats the time": [f"It's {__import__('time').strftime('%I:%M %p')}."],
-    "what day is it": [f"It's {__import__('time').strftime('%A, %B %d')}."],
-
     # ── Farewells ──
     "bye": ["Until next time.", "Goodbye. I'll be here when you return."],
     "bye jarvis": ["Goodbye. Standing by."],
