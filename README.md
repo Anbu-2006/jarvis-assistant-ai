@@ -1,7 +1,12 @@
-# JARVIS
+# 🤖 JARVIS — Intelligent Voice-First OS Assistant
 
-> [!IMPORTANT]
-> **UNDER CONSTRUCTION** — This project is currently in active development.
+> **Voice-First AI Assistant for Windows with 47+ MCP Tools, Audio-Reactive Three.js HUD, and Multi-LLM Routing**
+
+[![Platform](https://img.shields.io/badge/Platform-Windows%2010%2F11-0078D6?style=flat&logo=windows)](server.py)
+[![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?style=flat&logo=python)](requirements.txt)
+[![MCP](https://img.shields.io/badge/MCP%20Tools-47%2B%20OS%20Automations-009688?style=flat)](jarvis/)
+[![Three.js](https://img.shields.io/badge/Frontend-Three.js%20Particle%20HUD-black?style=flat&logo=three.js)](frontend/)
+[![GitHub Repo](https://img.shields.io/badge/GitHub-Anbu--2006%2FJarvis--assitant-181717?style=flat&logo=github)](https://github.com/Anbu-2006/Jarvis-assitant)
 
 **Just A Rather Very Intelligent System.**
 
@@ -43,8 +48,8 @@ JARVIS can browse the web, build entire projects via your IDE, see your screen, 
 
 ```bash
 # 1. Clone the repo
-git clone https://github.com/yourusername/jarvis.git
-cd jarvis
+git clone https://github.com/Anbu-2006/Jarvis-assitant.git
+cd Jarvis-assitant
 
 # 2. Set up environment
 cp .env.example .env
@@ -177,9 +182,9 @@ Please open an issue before submitting large PRs so we can discuss the approach.
 
 Free for personal, non-commercial use. Commercial use requires a license — visit [ethanplus.ai](https://ethanplus.ai) for inquiries. See [LICENSE](LICENSE) for details.
 
-## Credits
-
-Built by [Ethan](https://ethanplus.ai).
+## 👤 Maintainer & Engineering
+- **Anbuselvan T.** ([@Anbu-2006](https://github.com/Anbu-2006))
+- Built on foundational open research by Ethan (ethanplus.ai) and extended with 47+ Windows OS automations.
 
 Powered by [NVIDIA NIM](https://build.nvidia.com/) — DeepSeek V4 Flash.
 
