@@ -84,6 +84,39 @@ def init_db():
             title, content, topic,
             content='notes', content_rowid='id'
         );
+
+        CREATE TABLE IF NOT EXISTS failure_episodes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_intent TEXT NOT NULL,
+            tool_name TEXT NOT NULL,
+            arguments TEXT DEFAULT '{}',
+            error_type TEXT DEFAULT '',
+            error_message TEXT NOT NULL,
+            root_cause TEXT DEFAULT '',
+            working_fix TEXT NOT NULL,
+            fix_type TEXT DEFAULT 'cli_workaround',
+            success_verified INTEGER DEFAULT 1,
+            created_at REAL NOT NULL,
+            last_used_at REAL,
+            use_count INTEGER DEFAULT 1
+        );
+
+        CREATE TABLE IF NOT EXISTS ui_button_maps (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            app_name TEXT NOT NULL,
+            control_name TEXT NOT NULL,
+            control_type TEXT DEFAULT 'Button',
+            action_recipe TEXT NOT NULL,
+            verified INTEGER DEFAULT 1,
+            created_at REAL NOT NULL,
+            last_used_at REAL,
+            UNIQUE(app_name, control_name)
+        );
+
+        CREATE VIRTUAL TABLE IF NOT EXISTS failure_fts USING fts5(
+            task_intent, tool_name, error_message, working_fix,
+            content='failure_episodes', content_rowid='id'
+        );
     """)
     conn.close()
     log.info("Memory database initialized")
@@ -446,6 +479,159 @@ async def extract_memories(user_text: str, jarvis_response: str, llm_client) -> 
         log.debug(f"Memory extraction failed: {e}")
 
     return []
+
+
+# ---------------------------------------------------------------------------
+# Reflexion Failure Memory & Learned Fixes Store
+# ---------------------------------------------------------------------------
+
+def record_failure_reflection(
+    tool_name: str,
+    error_message: str,
+    working_fix: str,
+    error_type: str = "",
+    task_intent: str = "",
+    arguments: dict = None,
+    root_cause: str = "",
+    fix_type: str = "cli_workaround",
+    success_verified: int = 1,
+) -> int:
+    """Store a learned error reflection and working fix into episodic memory."""
+    conn = _get_db()
+    args_json = json.dumps(arguments or {})
+    now = time.time()
+
+    existing = conn.execute(
+        "SELECT id, use_count FROM failure_episodes WHERE tool_name = ? AND working_fix = ?",
+        (tool_name, working_fix)
+    ).fetchone()
+
+    if existing:
+        conn.execute(
+            "UPDATE failure_episodes SET last_used_at = ?, use_count = use_count + 1, success_verified = ? WHERE id = ?",
+            (now, success_verified, existing["id"])
+        )
+        episode_id = existing["id"]
+    else:
+        cur = conn.execute(
+            """INSERT INTO failure_episodes 
+               (task_intent, tool_name, arguments, error_type, error_message, root_cause, working_fix, fix_type, success_verified, created_at, last_used_at, use_count)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (task_intent, tool_name, args_json, error_type, error_message, root_cause, working_fix, fix_type, success_verified, now, now, 1)
+        )
+        episode_id = cur.lastrowid
+        try:
+            conn.execute(
+                "INSERT INTO failure_fts (rowid, task_intent, tool_name, error_message, working_fix) VALUES (?, ?, ?, ?, ?)",
+                (episode_id, task_intent, tool_name, error_message, working_fix)
+            )
+        except Exception as e:
+            log.debug(f"Failed to update failure_fts: {e}")
+
+    conn.commit()
+    conn.close()
+    log.info(f"Recorded failure reflection #{episode_id} for {tool_name} with fix_type={fix_type}")
+    return episode_id
+
+
+def lookup_past_fix(tool_name: str, error_text: str = "", task_intent: str = "") -> dict | None:
+    """Look up a previously verified fix from episodic memory for this tool/error."""
+    conn = _get_db()
+    try:
+        rows = conn.execute(
+            """SELECT id, tool_name, arguments, error_type, error_message, root_cause, working_fix, fix_type, use_count
+               FROM failure_episodes 
+               WHERE tool_name = ? AND success_verified = 1
+               ORDER BY use_count DESC, last_used_at DESC""",
+            (tool_name,)
+        ).fetchall()
+
+        if rows:
+            if error_text:
+                err_clean = error_text.lower()
+                for r in rows:
+                    if r["error_message"].lower() in err_clean or any(k in err_clean for k in r["error_message"].lower().split() if len(k) > 4):
+                        _update_fix_usage(conn, r["id"])
+                        return dict(r)
+
+            top = rows[0]
+            _update_fix_usage(conn, top["id"])
+            return dict(top)
+
+        query = task_intent or error_text
+        if query:
+            clean_q = "".join(c for c in query if c.isalnum() or c.isspace()).strip()
+            if clean_q:
+                fts_rows = conn.execute(
+                    """SELECT e.id, e.tool_name, e.arguments, e.error_type, e.error_message, e.root_cause, e.working_fix, e.fix_type, e.use_count
+                       FROM failure_fts f
+                       JOIN failure_episodes e ON e.id = f.rowid
+                       WHERE failure_fts MATCH ? AND e.success_verified = 1
+                       ORDER BY rank
+                       LIMIT 1""",
+                    (clean_q,)
+                ).fetchall()
+                if fts_rows:
+                    hit = fts_rows[0]
+                    _update_fix_usage(conn, hit["id"])
+                    return dict(hit)
+    except Exception as e:
+        log.warning(f"Error during lookup_past_fix: {e}")
+    finally:
+        conn.close()
+    return None
+
+
+def _update_fix_usage(conn: sqlite3.Connection, episode_id: int):
+    try:
+        conn.execute(
+            "UPDATE failure_episodes SET last_used_at = ?, use_count = use_count + 1 WHERE id = ?",
+            (time.time(), episode_id)
+        )
+        conn.commit()
+    except Exception:
+        pass
+
+
+def list_learned_fixes(limit: int = 20) -> list[dict]:
+    """Retrieve list of learned error reflections and fixes."""
+    conn = _get_db()
+    rows = conn.execute(
+        """SELECT id, task_intent, tool_name, error_message, working_fix, fix_type, use_count, last_used_at
+           FROM failure_episodes
+           ORDER BY last_used_at DESC LIMIT ?""",
+        (limit,)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def save_ui_button_mapping(app_name: str, control_name: str, control_type: str, action_recipe: str) -> None:
+    """Save or update discovered UI button control recipe."""
+    conn = _get_db()
+    now = time.time()
+    conn.execute(
+        """INSERT INTO ui_button_maps (app_name, control_name, control_type, action_recipe, verified, created_at, last_used_at)
+           VALUES (?, ?, ?, ?, 1, ?, ?)
+           ON CONFLICT(app_name, control_name) DO UPDATE SET
+               action_recipe = excluded.action_recipe,
+               control_type = excluded.control_type,
+               last_used_at = excluded.last_used_at""",
+        (app_name.lower(), control_name.lower(), control_type, action_recipe, now, now)
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_ui_button_mapping(app_name: str, control_name: str) -> dict | None:
+    """Get stored UI button mapping."""
+    conn = _get_db()
+    row = conn.execute(
+        "SELECT * FROM ui_button_maps WHERE app_name = ? AND control_name = ?",
+        (app_name.lower(), control_name.lower())
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
 
 
 # Initialize on import

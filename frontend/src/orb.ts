@@ -13,6 +13,7 @@ export type OrbState = "idle" | "listening" | "thinking" | "speaking";
 export interface Orb {
   setState(s: OrbState): void;
   setAnalyser(a: AnalyserNode | null): void;
+  setMicAnalyser(a: AnalyserNode | null): void;
   destroy(): void;
 }
 
@@ -117,6 +118,10 @@ export function createOrb(canvas: HTMLCanvasElement): Orb {
   let freqData = new Uint8Array(64);
   let bass = 0, mid = 0;
 
+  let micAnalyser: AnalyserNode | null = null;
+  let micFreqData = new Uint8Array(64);
+  let micEnergy = 0;
+
   const clock = new THREE.Clock();
 
   function animate() {
@@ -124,13 +129,28 @@ export function createOrb(canvas: HTMLCanvasElement): Orb {
     requestAnimationFrame(animate);
     const t = clock.getElapsedTime();
 
+    // Process user microphone energy when speaking
+    micEnergy = 0;
+    if (micAnalyser) {
+      micAnalyser.getByteFrequencyData(micFreqData);
+      let mSum = 0;
+      for (let i = 0; i < 32; i++) {
+        mSum += micFreqData[i];
+      }
+      micEnergy = mSum / (32 * 255);
+    }
+
     switch (state) {
       case "idle":
         targetRadius = 28; targetSpeed = 0.2; targetBright = 0.5; targetSize = 0.35;
         targetLineAmount = 0.15; targetElectronRate = 0; break;
       case "listening":
-        targetRadius = 22; targetSpeed = 0.3; targetBright = 0.65; targetSize = 0.4;
-        targetLineAmount = 0.4; targetElectronRate = 0; break;
+        targetRadius = 22 + micEnergy * 16; 
+        targetSpeed = 0.3 + micEnergy * 0.45; 
+        targetBright = 0.65 + micEnergy * 0.4; 
+        targetSize = 0.4 + micEnergy * 0.15;
+        targetLineAmount = 0.35 + micEnergy * 0.45; 
+        targetElectronRate = 0; break;
       case "thinking":
         targetRadius = 16; targetSpeed = 0.5; targetBright = 0.7; targetSize = 0.3;
         targetLineAmount = 1.0; targetElectronRate = 0.015; break;
@@ -155,7 +175,7 @@ export function createOrb(canvas: HTMLCanvasElement): Orb {
       spinZ += transitionEnergy * 0.008 * Math.cos(t * 1.3);
     }
 
-    // Audio
+    // Audio from TTS playback
     bass = 0; mid = 0;
     if (analyser) {
       analyser.getByteFrequencyData(freqData);
@@ -172,6 +192,25 @@ export function createOrb(canvas: HTMLCanvasElement): Orb {
     cloudZVel += (zTarget - cloudZ) * 0.008;
     cloudZVel *= 0.94;
     cloudZ += cloudZVel;
+
+    // ── Vertical Y floating / bobbing motion ──
+    // Distinct responsive up-and-down motion whenever the user speaks into microphone
+    let yTarget = 0;
+    if (state === "listening") {
+      const bobFreq = 3.2 + micEnergy * 4.5;
+      const bobAmp = 4.5 + micEnergy * 24.0;
+      yTarget = Math.sin(t * bobFreq) * bobAmp;
+    } else if (state === "speaking") {
+      yTarget = Math.sin(t * 1.8) * (2.0 + bass * 6.0);
+    } else if (state === "thinking") {
+      yTarget = Math.sin(t * 2.8) * 3.5;
+    } else {
+      yTarget = Math.sin(t * 0.9) * 1.8;
+    }
+
+    points.position.y += (yTarget - points.position.y) * 0.14;
+    lines.position.y = points.position.y;
+    electrons.position.y = points.position.y;
 
     points.rotation.x = spinX; points.rotation.y = spinY; points.rotation.z = spinZ;
     points.position.z = cloudZ;
@@ -204,6 +243,12 @@ export function createOrb(canvas: HTMLCanvasElement): Orb {
         vel[i3] += (x / dist) * bass * 0.02;
         vel[i3 + 1] += (y / dist) * bass * 0.02;
         vel[i3 + 2] += (z / dist) * bass * 0.02;
+      }
+      if (state === "listening" && micEnergy > 0.03) {
+        const micPulse = Math.sin(t * 12 + px);
+        vel[i3] += (x / dist) * micEnergy * 0.028 * micPulse;
+        vel[i3 + 1] += (y / dist) * micEnergy * 0.028 * micPulse;
+        vel[i3 + 2] += (z / dist) * micEnergy * 0.028 * micPulse;
       }
       if (state === "speaking" && mid > 0.1) {
         const pulse = Math.sin(t * 8 + px);
@@ -327,6 +372,10 @@ export function createOrb(canvas: HTMLCanvasElement): Orb {
     setAnalyser(a: AnalyserNode | null) {
       analyser = a;
       if (a) freqData = new Uint8Array(a.frequencyBinCount);
+    },
+    setMicAnalyser(a: AnalyserNode | null) {
+      micAnalyser = a;
+      if (a) micFreqData = new Uint8Array(a.frequencyBinCount);
     },
     destroy() {
       destroyed = true;

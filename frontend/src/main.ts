@@ -101,7 +101,11 @@ function transition(newState: State) {
       if (!isMuted) voiceInput.resume();
       break;
     case "listening":
-      if (!isMuted) voiceInput.resume();
+      if (!isMuted) {
+        voiceInput.resume();
+        const micAnalyser = voiceInput.getAnalyser();
+        if (micAnalyser) orb.setMicAnalyser(micAnalyser);
+      }
       break;
     case "thinking":
       voiceInput.pause();
@@ -113,12 +117,61 @@ function transition(newState: State) {
 }
 
 // ---------------------------------------------------------------------------
+// Interactive Clarification Prompt
+// ---------------------------------------------------------------------------
+
+const promptOverlay = document.getElementById("interactive-prompt-overlay")!;
+const promptTitle = document.getElementById("prompt-title")!;
+const promptMessage = document.getElementById("prompt-message")!;
+const promptOptions = document.getElementById("prompt-options")!;
+const promptClose = document.getElementById("prompt-close")!;
+
+function showInteractivePrompt(data: any) {
+  promptTitle.textContent = data.title || "SYSTEM CLARIFICATION";
+  promptMessage.textContent = data.message || "Please provide additional details:";
+  promptOptions.innerHTML = "";
+
+  if (Array.isArray(data.options) && data.options.length > 0) {
+    data.options.forEach((opt: any) => {
+      const btn = document.createElement("button");
+      btn.className = "prompt-chip";
+      btn.textContent = opt.name || opt;
+      btn.addEventListener("click", () => {
+        hideInteractivePrompt();
+        const text = opt.name || opt;
+        socket.send({ type: "transcript", text, isFinal: true });
+        addLog(`USER (SELECT): ${text}`);
+      });
+      promptOptions.appendChild(btn);
+    });
+  }
+
+  promptOverlay.style.display = "flex";
+  requestAnimationFrame(() => {
+    promptOverlay.classList.add("visible");
+  });
+}
+
+function hideInteractivePrompt() {
+  promptOverlay.classList.remove("visible");
+  setTimeout(() => {
+    promptOverlay.style.display = "none";
+  }, 250);
+}
+
+promptClose.addEventListener("click", () => {
+  hideInteractivePrompt();
+  socket.send({ type: "transcript", text: "cancel", isFinal: true });
+});
+
+// ---------------------------------------------------------------------------
 // Voice input
 // ---------------------------------------------------------------------------
 
 const voiceInput = createVoiceInput(
   (text: string) => {
     audioPlayer.stop();
+    hideInteractivePrompt();
     socket.send({ type: "transcript", text, isFinal: true });
     transition("thinking");
     addLog(`USER: ${text.substring(0, 50)}`);
@@ -133,6 +186,10 @@ const voiceInput = createVoiceInput(
       transition("listening");
       addLog("SYS: Barge-in detected, playback stopped");
     }
+  },
+  (interimText: string) => {
+    // Stream interim transcript to Laya for real-time sub-35ms prediction
+    socket.send({ type: "transcript", text: interimText, isFinal: false });
   }
 );
 
@@ -165,6 +222,8 @@ socket.onMessage((msg) => {
       console.log("[JARVIS]", msg.text);
       addLog(`JARVIS: ${(msg.text as string).substring(0, 50)}`);
     }
+  } else if (type === "interactive_prompt") {
+    showInteractivePrompt(msg);
   } else if (type === "status") {
     const state = msg.state as string;
     if (state === "thinking" && currentState !== "thinking") {
@@ -231,9 +290,17 @@ btnInitialize.addEventListener("click", () => {
   setTimeout(() => {
     voiceInput.start();
     transition("listening");
+    const mic = voiceInput.getAnalyser();
+    if (mic) orb.setMicAnalyser(mic);
     addLog("SYS: Voice input active");
   }, 1000);
 });
+
+// Continuously sync mic analyser once stream is active
+setInterval(() => {
+  const mic = voiceInput.getAnalyser();
+  if (mic) orb.setMicAnalyser(mic);
+}, 1000);
 
 ensureAudioContext();
 

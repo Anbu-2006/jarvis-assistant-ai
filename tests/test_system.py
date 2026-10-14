@@ -28,6 +28,8 @@ def test(name, condition, detail=""):
     else:
         FAIL += 1
         RESULTS.append(f"  [FAIL] {name} -- {detail}")
+test.__test__ = False
+
 
 def section(title):
     RESULTS.append(f"\n{'='*60}")

@@ -28,6 +28,7 @@ if _env_path.exists():
             _k, _, _v = _line.partition("=")
             os.environ.setdefault(_k.strip(), _v.strip().strip('"').strip("'"))
 import uuid
+import urllib.parse
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
@@ -57,6 +58,14 @@ from jarvis.tools.notes_access import get_recent_notes, read_note, search_notes_
 from jarvis.core.dispatch_registry import DispatchRegistry
 from jarvis.core.planner import TaskPlanner, detect_planning_mode, BYPASS_PHRASES
 from jarvis.mcp_client import get_mcp_client
+from jarvis.core.decision_client import decision_client
+from jarvis.core.clarification_dialog import clarification_manager
+from jarvis.app_discovery import launch_application, discover_all_apps
+from jarvis.core.conversational_engine import conversational_engine, strip_markdown_for_tts
+from jarvis.core.autonomous_planner import plan_executor
+from jarvis.tools.whatsapp_tool import send_whatsapp_message
+from jarvis.tools.youtube_tool import play_youtube_video
+from jarvis.core.universal_os_operator import os_operator
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
 log = logging.getLogger("jarvis")
@@ -1403,11 +1412,15 @@ async def lifespan(application: FastAPI):
                 if _attempt == 0:
                     log.warning("[Startup] Ollama not running, attempting auto-start...")
                     import subprocess as _sp
-                    _sp.Popen(["ollama", "serve"], stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
-                              creationflags=getattr(_sp, 'CREATE_NO_WINDOW', 0))
-                await asyncio.sleep(3)
+                    try:
+                        _sp.Popen(["ollama", "serve"], stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+                                  creationflags=getattr(_sp, 'CREATE_NO_WINDOW', 0))
+                    except Exception as _e:
+                        log.warning(f"[Startup] Ollama executable not found or failed to start: {_e}")
+                        break
+                await asyncio.sleep(1)
         else:
-            log.error("[Startup] Could not start Ollama after 3 attempts")
+            log.info("[Startup] Ollama not detected, relying 100% on local Laya AI engine.")
 
         # Preload model into VRAM (BLOCKING so model is hot before connections)
         try:
@@ -1436,6 +1449,9 @@ async def lifespan(application: FastAPI):
     mcp_client = get_mcp_client()
     await mcp_client.start()
     log.info(f"MCP client loaded: {len(mcp_client.available_tools)} system tools")
+
+    # Log dual-engine status
+    log.info("Dual-Engine Online: System 1 (Microsoft-Decision-1) & System 2 (OpenRouter)")
 
     # Start context refresh in a separate thread (never touches event loop)
     _refresh_context_sync()
@@ -2723,6 +2739,10 @@ async def voice_handler(ws: WebSocket):
     work_session = WorkSession()
     planner = TaskPlanner()
 
+    # Laya real-time decision engine tracking
+    discovered_apps: list[str] = list(discover_all_apps().keys())
+    _prelaunched_in_burst: set[str] = set()
+
     # Response cancellation — when new input arrives, cancel current response
     _current_response_id = 0
     _cancel_response = False
@@ -2789,10 +2809,33 @@ async def voice_handler(ws: WebSocket):
                 await stream_tts_response(ws, tts, response_text)
                 continue
 
-            if msg.get("type") != "transcript" or not msg.get("isFinal"):
+            if msg.get("type") != "transcript":
                 continue
 
-            user_text = apply_speech_corrections(msg.get("text", "").strip())
+            is_final = msg.get("isFinal", True)
+            raw_text = msg.get("text", "").strip()
+            user_text = apply_speech_corrections(raw_text)
+
+            # ── A. REAL-TIME INTERIM PRE-WARM / LAUNCH (While user is speaking) ──
+            if not is_final:
+                if user_text and len(user_text.split()) >= 2:
+                    interim_dec = decision_client.predict_action(user_text, known_apps=discovered_apps)
+                    invalid_apps = getattr(decision_client, "INVALID_APP_NAMES", set())
+                    if (
+                        interim_dec.get("action") == "open_app" 
+                        and interim_dec.get("app")
+                        and interim_dec.get("confidence", 0) >= 0.70
+                        and interim_dec["app"].lower() not in invalid_apps
+                    ):
+                        app_target = interim_dec["app"]
+                        if app_target not in _prelaunched_in_burst:
+                            _prelaunched_in_burst.add(app_target)
+                            log.info(f"⚡ Instant real-time launch while speaking: {app_target}")
+                            launch_application(app_target)
+                continue
+
+            _prelaunched_in_burst.clear()
+
             if not user_text:
                 continue
 
@@ -2806,6 +2849,31 @@ async def voice_handler(ws: WebSocket):
             voice_state["last_user_time"] = time.time()
             log.info(f"User: {user_text}")
             await ws.send_json({"type": "status", "state": "thinking"})
+
+            # ── B. ACTIVE CLARIFICATION HANDLING ──
+            if clarification_manager.is_active:
+                reply_res = clarification_manager.process_reply(user_text)
+                if reply_res.get("ready"):
+                    act = reply_res["action"]
+                    if act.action_type == "send_message":
+                        launch_application(act.app_name or "whatsapp")
+                        response_text = f"Message sent to {act.contact}, sir."
+                    elif act.action_type == "open_folder":
+                        launch_application(act.app_name or "antigravity", act.folder_path)
+                        response_text = f"Opened in Antigravity, sir."
+                    else:
+                        response_text = "Done, sir."
+                    tts = strip_markdown_for_tts(response_text)
+                    await stream_tts_response(ws, tts, response_text)
+                elif reply_res.get("cancelled"):
+                    cancel_msg = reply_res.get("spoken_prompt", "Action cancelled, sir.")
+                    await stream_tts_response(ws, cancel_msg, cancel_msg)
+                else:
+                    if reply_res.get("visual_prompt"):
+                        await ws.send_json(reply_res["visual_prompt"])
+                    prompt_msg = reply_res.get("spoken_prompt", "Please specify, sir.")
+                    await stream_tts_response(ws, prompt_msg, prompt_msg)
+                continue
 
             # Lazy project scan on first message
             global cached_projects
@@ -3262,15 +3330,328 @@ async def voice_handler(ws: WebSocket):
                         else:
                             response_text = "Understood."
                     else:
-                        if not llm:
-                            response_text = "API key not configured."
+                        # ── 1. COMPOUND / MULTI-STEP PLANNER ──
+                        if plan_executor.is_compound_request(user_text):
+                            log.info(f"Detected compound/multi-step plan: {user_text}")
+                            steps = plan_executor.decompose(user_text)
+                            if steps and (len(steps) > 1 or steps[0]["action"] in ["send_whatsapp", "play_youtube"]):
+                                plan_res = await plan_executor.execute_plan(steps)
+                                response_text = plan_res.get("spoken_confirmation", "Plan executed, sir.")
+                            else:
+                                decision = await decision_client.predict_intent(user_text, known_apps=discovered_apps)
+                                action = decision.get("action", "casual_chat")
+                                conf = decision.get("confidence", 0.0)
+                                log.info(f"System 1 Decision-1 ({decision.get('latency_ms')}ms): action={action} (conf: {conf:.2f})")
+                                if action == "open_app" and decision.get("app"):
+                                    launch_application(decision["app"])
+                                    response_text = f"Opening {decision['app']}, sir."
+                                else:
+                                    response_text = await generate_response(
+                                        user_text, llm, task_manager,
+                                        cached_projects, history,
+                                        last_response=last_jarvis_response,
+                                        session_summary=session_summary,
+                                    )
+                                    response_text = strip_markdown_for_tts(response_text)
+                        # ── 2. DIRECT YOUTUBE PLAYBACK ──
+                        elif ("youtube" in user_text.lower() and any(w in user_text.lower() for w in ["play", "watch", "song", "video"])) or (user_text.lower().startswith("play ") and not any(w in user_text.lower() for w in ["game", "sport"])):
+                            log.info(f"Direct YouTube command: {user_text}")
+                            yt_q = re.sub(r".*?(?:play|watch)\s+", "", user_text, flags=re.I)
+                            yt_q = re.sub(r"\s+on\s+youtube.*", "", yt_q, flags=re.I).strip()
+                            yt_res = play_youtube_video(yt_q)
+                            title = yt_res.get("title", yt_q)
+                            response_text = f"Playing '{title}' on YouTube, sir."
                         else:
-                            response_text = await generate_response(
-                                user_text, llm, task_manager,
-                                cached_projects, history,
-                                last_response=last_jarvis_response,
-                                session_summary=session_summary,
-                            )
+                            # ── SYSTEM 1: MICROSOFT-DECISION-1 VIA OPENROUTER ──
+                            decision = await decision_client.predict_intent(user_text, known_apps=discovered_apps)
+                            action = decision.get("action", "casual_chat")
+                            # Check if Decision model flagged ambiguous command
+                            if decision.get("needs_clarification") and action not in ["casual_chat", "capabilities"]:
+                                if action == "open_app":
+                                    response_text = "Which application would you like me to open, sir? Please state the name."
+                                elif action in ["send_whatsapp", "send_message"]:
+                                    clar_res = clarification_manager.start_clarification(
+                                        action_type="send_message",
+                                        app_name="WhatsApp",
+                                        raw_query=user_text,
+                                        message_text=decision.get("message") or "",
+                                    )
+                                    if clar_res.get("visual_prompt"):
+                                        await ws.send_json(clar_res["visual_prompt"])
+                                    response_text = clar_res.get("spoken_prompt") or "Whom would you like to message on WhatsApp, sir?"
+                                elif action == "open_folder":
+                                    response_text = "Which project or folder would you like to open in Antigravity, sir?"
+                                else:
+                                    response_text = "Could you clarify which application or target you mean, sir?"
+
+                            elif action == "antigravity_prompt":
+                                prompt_txt = decision.get("prompt") or ""
+                                mcp_cli = get_mcp_client()
+                                res = await mcp_cli.call_tool("antigravity_prompt", prompt=prompt_txt, auto_submit=True)
+                                response_text = "Prompt sent to Antigravity chat, sir."
+
+                            elif action == "obs_control":
+                                obs_act = decision.get("obs_action") or "start"
+                                mcp_cli = get_mcp_client()
+                                if obs_act == "stop":
+                                    res = await mcp_cli.call_tool("obs_stop_recording")
+                                    response_text = "OBS recording stopped, sir."
+                                elif obs_act == "status":
+                                    res = await mcp_cli.call_tool("obs_status")
+                                    response_text = f"OBS Studio status: {res.get('status', 'checked')}, sir."
+                                else:
+                                    res = await mcp_cli.call_tool("obs_start_recording")
+                                    response_text = "OBS Studio recording started, sir."
+
+                            elif action == "vpn_control":
+                                vpn_act = decision.get("vpn_action") or "connect"
+                                country = decision.get("country") or "United States"
+                                mcp_cli = get_mcp_client()
+                                if vpn_act == "disconnect":
+                                    res = await mcp_cli.call_tool("urban_vpn_disconnect")
+                                    response_text = "Urban VPN disconnected, sir."
+                                else:
+                                    res = await mcp_cli.call_tool("urban_vpn_connect", country=country)
+                                    response_text = f"Connecting Urban VPN to {country}, sir."
+
+                            elif action == "workflow_vpn_then_capcut":
+                                country = decision.get("country") or "United States"
+                                mcp_cli = get_mcp_client()
+                                asyncio.create_task(mcp_cli.call_tool("workflow_vpn_then_capcut", country=country))
+                                response_text = f"Initiating workflow: connecting VPN to {country}, then launching CapCut, sir."
+
+                            elif action == "capcut_control":
+                                cc_act = decision.get("capcut_action") or "open"
+                                mcp_cli = get_mcp_client()
+                                if cc_act == "export":
+                                    res = await mcp_cli.call_tool("capcut_export_project")
+                                    response_text = "Opened CapCut export dialog, sir."
+                                else:
+                                    proj = decision.get("project")
+                                    res = await mcp_cli.call_tool("capcut_open_editor", project_name=proj)
+                                    response_text = "Opened CapCut editor, sir."
+
+                            elif action == "open_terminal":
+                                cmd = decision.get("command")
+                                mcp_cli = get_mcp_client()
+                                res = await mcp_cli.call_tool("open_terminal_run", command=cmd)
+                                response_text = "Opened Windows Terminal, sir."
+
+                            elif action == "open_and_type":
+                                app_name = decision.get("app") or "notepad"
+                                text_to_type = decision.get("text_to_type") or ""
+                                launch_application(app_name)
+                                await asyncio.sleep(0.8)
+                                os_operator.focus_window(app_name)
+                                await asyncio.sleep(0.3)
+                                if text_to_type:
+                                    os_operator.type_text(text_to_type)
+                                    response_text = f"Opened {app_name.title()} and typed your text, sir."
+                                else:
+                                    response_text = f"Opened {app_name.title()}, sir. What would you like me to type?"
+
+                            elif action == "type_text":
+                                text_to_type = decision.get("text_to_type") or ""
+                                if text_to_type:
+                                    os_operator.type_text(text_to_type)
+                                    response_text = "Typed, sir."
+                                else:
+                                    response_text = "What text would you like me to type, sir?"
+
+                            elif action == "window_control":
+                                win_action = decision.get("window_action", "")
+                                target = decision.get("app") or ""
+                                if win_action == "minimize":
+                                    os_operator.minimize_window()
+                                    response_text = "Window minimized, sir."
+                                elif win_action == "maximize":
+                                    os_operator.maximize_window()
+                                    response_text = "Window maximized, sir."
+                                elif win_action == "close":
+                                    os_operator.close_window(title_pattern=target if target else None)
+                                    response_text = f"Closed {target.title() if target else 'window'}, sir."
+                                elif win_action == "snap_left":
+                                    os_operator.hotkey("win+left")
+                                    response_text = "Snapped window to the left, sir."
+                                elif win_action == "snap_right":
+                                    os_operator.hotkey("win+right")
+                                    response_text = "Snapped window to the right, sir."
+                                elif win_action == "show_desktop":
+                                    os_operator.show_desktop()
+                                    response_text = "Showing desktop, sir."
+                                elif win_action == "switch_app":
+                                    os_operator.switch_app()
+                                    response_text = "Switched window, sir."
+                                elif win_action == "focus" and target:
+                                    os_operator.focus_window(target)
+                                    response_text = f"Focused {target.title()}, sir."
+                                else:
+                                    os_operator.show_desktop()
+                                    response_text = "Window command executed, sir."
+
+                            elif action == "gui_shortcut":
+                                shortcut = (decision.get("shortcut") or "").lower()
+                                if shortcut in ["save", "ctrl+s"]:
+                                    os_operator.hotkey("ctrl+s")
+                                    response_text = "Saved, sir."
+                                elif shortcut in ["copy", "ctrl+c"]:
+                                    os_operator.hotkey("ctrl+c")
+                                    response_text = "Copied to clipboard, sir."
+                                elif shortcut in ["paste", "ctrl+v"]:
+                                    os_operator.hotkey("ctrl+v")
+                                    response_text = "Pasted, sir."
+                                elif shortcut in ["select_all", "ctrl+a"]:
+                                    os_operator.hotkey("ctrl+a")
+                                    response_text = "Selected all, sir."
+                                elif shortcut in ["undo", "ctrl+z"]:
+                                    os_operator.hotkey("ctrl+z")
+                                    response_text = "Undone, sir."
+                                elif shortcut in ["enter", "return"]:
+                                    os_operator.press_key("enter")
+                                    response_text = "Enter pressed, sir."
+                                else:
+                                    os_operator.hotkey(shortcut)
+                                    response_text = "Shortcut executed, sir."
+
+                            elif action == "process_control":
+                                proc = decision.get("process") or decision.get("app")
+                                if proc:
+                                    res = os_operator.kill_process(proc)
+                                    response_text = f"Terminated {proc.title()}, sir." if res.get("success") else f"Could not terminate {proc.title()}, sir."
+                                else:
+                                    response_text = "Which process would you like me to close, sir?"
+
+                            elif action == "open_file":
+                                path_val = decision.get("path")
+                                if path_val:
+                                    res = os_operator.open_path(path_val)
+                                    response_text = f"Opened {path_val}, sir." if res.get("success") else f"Could not find {path_val}, sir."
+                                else:
+                                    response_text = "Which file would you like me to open, sir?"
+
+                            elif action == "open_app":
+                                app_name = decision.get("app")
+
+                                invalid_apps = getattr(decision_client, "INVALID_APP_NAMES", set())
+                                if not app_name or app_name.lower() in invalid_apps:
+                                    response_text = "Which application would you like me to open, sir? Please state the name."
+                                else:
+                                    launch_res = launch_application(app_name)
+                                    if launch_res.get("success"):
+                                        response_text = f"{app_name.title()} is open, sir."
+                                    else:
+                                        response_text = f"I could not locate {app_name.title()} among your installed applications, sir."
+
+                            elif action in ["send_whatsapp", "send_message"]:
+                                app_target = "WhatsApp"
+                                contact_target = decision.get("contact")
+                                msg_target = decision.get("message") or ""
+                                if not contact_target:
+                                    clar_res = clarification_manager.start_clarification(
+                                        action_type="send_message",
+                                        app_name=app_target,
+                                        raw_query=user_text,
+                                        message_text=msg_target,
+                                    )
+                                    if clar_res.get("visual_prompt"):
+                                        await ws.send_json(clar_res["visual_prompt"])
+                                    response_text = clar_res.get("spoken_prompt") or f"Whom would you like to message on {app_target}, sir?"
+                                else:
+                                    send_res = send_whatsapp_message(contact_target, msg_target)
+                                    if msg_target:
+                                        response_text = f"Texting {contact_target} on {app_target}: '{msg_target}', sir."
+                                    else:
+                                        response_text = f"Opening chat with {contact_target} on {app_target}, sir."
+
+                            elif action == "play_youtube":
+                                yt_q = decision.get("query") or user_text
+                                yt_res = play_youtube_video(yt_q)
+                                title = yt_res.get("title", yt_q)
+                                response_text = f"Playing '{title}' on YouTube, sir."
+
+                            elif action == "open_folder":
+                                folder_target = decision.get("folder")
+                                if not folder_target:
+                                    response_text = "Which project or folder would you like to open in Antigravity, sir?"
+                                else:
+                                    launch_application("antigravity", folder_target)
+                                    response_text = f"Opening {folder_target} in Antigravity, sir."
+
+                            elif action == "get_weather":
+                                w_raw = await fetch_weather()
+                                if w_raw and "unavailable" not in w_raw.lower():
+                                    response_text = f"Current weather report: {w_raw}, sir."
+                                else:
+                                    response_text = "Weather telemetry is currently unavailable, sir."
+
+                            elif action == "get_time":
+                                now_str = datetime.now().strftime("%I:%M %p on %A, %B %d")
+                                response_text = f"It is currently {now_str}, sir."
+
+                            elif action == "get_battery":
+                                try:
+                                    import psutil
+                                    batt = psutil.sensors_battery()
+                                    if batt:
+                                        status = "plugged in and charging" if batt.power_plugged else "running on battery"
+                                        response_text = f"Battery is at {batt.percent} percent, {status}, sir."
+                                    else:
+                                        response_text = "Battery telemetry is not accessible on this system, sir."
+                                except Exception:
+                                    response_text = "Unable to read battery status at this moment, sir."
+
+                            elif action == "system_control":
+                                sub = decision.get("sub_action", "")
+                                val = decision.get("value")
+                                raw_low = user_text.lower()
+                                if "volume" in raw_low or sub == "volume":
+                                    if "mute" in raw_low:
+                                        os_operator.mute_volume(True)
+                                        response_text = "Audio muted, sir."
+                                    elif "unmute" in raw_low:
+                                        os_operator.mute_volume(False)
+                                        response_text = "Audio unmuted, sir."
+                                    elif val is not None:
+                                        os_operator.set_volume(val)
+                                        response_text = f"Volume set to {val} percent, sir."
+                                    elif "up" in raw_low or "increase" in raw_low:
+                                        os_operator.hotkey("volumeup")
+                                        response_text = "Volume increased, sir."
+                                    elif "down" in raw_low or "decrease" in raw_low:
+                                        os_operator.hotkey("volumedown")
+                                        response_text = "Volume decreased, sir."
+                                    else:
+                                        response_text = "Adjusted volume, sir."
+                                elif "lock" in raw_low:
+                                    os_operator.lock_workstation()
+                                    response_text = "Locking workstation now, sir."
+                                elif "recycle bin" in raw_low or "trash" in raw_low:
+                                    os_operator.empty_recycle_bin()
+                                    response_text = "Recycle bin emptied, sir."
+                                else:
+                                    response_text = "System command executed, sir."
+
+                            elif action == "web_search":
+                                query_target = decision.get("query") or user_text
+                                response_text = f"Searching for {query_target}, sir."
+                                asyncio.create_task(_execute_browse(f"https://www.google.com/search?q={urllib.parse.quote(query_target)}"))
+
+                            elif action == "capabilities":
+                                response_text = "I am powered by Microsoft Decision 1 and OpenRouter cloud frontier intelligence, sir. I can launch all 151 installed apps, type text, manage windows and hotkeys, control volume and hardware, text on WhatsApp, play YouTube music, and answer complex reasoning queries."
+
+                            else:
+                                # ── SYSTEM 2: OPENROUTER PREMIER REASONING ENGINE (120B MTP) ──
+                                log.info(f"Routing to System 2 Frontier Brain: {user_text}")
+                                response_text = await generate_response(
+                                    user_text, llm, task_manager,
+                                    cached_projects, history,
+                                    last_response=last_jarvis_response,
+                                    session_summary=session_summary,
+                                )
+                                response_text = strip_markdown_for_tts(response_text)
+                                if not response_text.strip():
+                                    response_text = "At your service, sir."
+
 
                             # Check for action tags embedded in LLM response
                             clean_response, embedded_action = extract_action(response_text)

@@ -38,10 +38,11 @@ class MCPClient:
         self._started = False
         self._schema_cache: str | None = None
         self._exit_stack = None
+        self._load_builtin_tools()
 
-    async def start(self):
-        """Load all MCP tools from the server module."""
-        if self._started:
+    def _load_builtin_tools(self):
+        """Synchronously load all in-memory tools from the server module."""
+        if self._tools:
             return
 
         try:
@@ -71,6 +72,10 @@ class MCPClient:
                 list_open_windows, close_application, send_notification,
                 # Utility
                 get_weather, set_timer,
+                # Application Automation
+                antigravity_prompt, obs_start_recording, obs_stop_recording, obs_status,
+                urban_vpn_connect, urban_vpn_disconnect, capcut_open_editor, capcut_export_project,
+                workflow_vpn_then_capcut, open_terminal_run, inspect_app_ui,
             )
 
             self._tools = {
@@ -132,20 +137,40 @@ class MCPClient:
                 # Utility
                 "get_weather": get_weather,
                 "set_timer": set_timer,
+                # Application Automation
+                "antigravity_prompt": antigravity_prompt,
+                "obs_start_recording": obs_start_recording,
+                "obs_stop_recording": obs_stop_recording,
+                "obs_status": obs_status,
+                "urban_vpn_connect": urban_vpn_connect,
+                "urban_vpn_disconnect": urban_vpn_disconnect,
+                "capcut_open_editor": capcut_open_editor,
+                "capcut_export_project": capcut_export_project,
+                "workflow_vpn_then_capcut": workflow_vpn_then_capcut,
+                "open_terminal_run": open_terminal_run,
+                "inspect_app_ui": inspect_app_ui,
             }
-
-            self._started = True
-            log.info(f"MCP client loaded {len(self._tools)} tools")
-
-            # Load external MCP servers asynchronously so we don't block startup
-            import contextlib
-            self._exit_stack = contextlib.AsyncExitStack()
-            asyncio.create_task(self._load_external_servers())
-
+            log.info(f"MCP client loaded {len(self._tools)} builtin tools")
         except ImportError as e:
             log.error(f"Failed to import MCP server: {e}")
         except Exception as e:
-            log.error(f"MCP client init failed: {e}")
+            log.error(f"MCP client builtin init failed: {e}")
+
+    async def start(self):
+        """Load external MCP servers asynchronously."""
+        if self._started:
+            return
+
+        self._load_builtin_tools()
+        self._started = True
+
+        # Load external MCP servers asynchronously so we don't block startup
+        try:
+            import contextlib
+            self._exit_stack = contextlib.AsyncExitStack()
+            asyncio.create_task(self._load_external_servers())
+        except Exception as e:
+            log.error(f"MCP client external init failed: {e}")
 
     async def _load_external_servers(self):
         """Dynamically load official open-source MCP servers (e.g., Puppeteer)."""
@@ -157,11 +182,11 @@ class MCPClient:
             return
 
         # Use Windows-compatible command array for npx
+        project_root = str(Path(__file__).parents[1])
         servers = [
             ("cmd", ["/c", "npx", "-y", "@modelcontextprotocol/server-puppeteer"]),
             ("cmd", ["/c", "npx", "-y", "@modelcontextprotocol/server-memory"]),
-            ("cmd", ["/c", "npx", "-y", "@modelcontextprotocol/server-filesystem", "e:\\Antigravity\\Jarvis-assitant"]),
-            ("python", ["-m", "mcp_pyautogui_server"]),
+            ("cmd", ["/c", "npx", "-y", "@modelcontextprotocol/server-filesystem", project_root]),
         ]
 
         for cmd, args in servers:
@@ -235,8 +260,8 @@ class MCPClient:
         self._schema_cache = "\n".join(lines)
         return self._schema_cache
 
-    async def call_tool(self, tool_name: str, **kwargs) -> str:
-        """Call an MCP tool by name with keyword arguments."""
+    async def call_tool(self, tool_name: str, task_intent: str = "", **kwargs) -> str:
+        """Call an MCP tool by name with keyword arguments, protected by the self-healing engine."""
         if not self._started:
             await self.start()
 
@@ -244,15 +269,23 @@ class MCPClient:
         if not func:
             return f"Unknown tool: {tool_name}. Available: {', '.join(self._tools.keys())}"
 
+        from jarvis.core.self_healing import self_healing_engine
         try:
-            if asyncio.iscoroutinefunction(func):
-                result = await func(**kwargs)
-            else:
-                loop = asyncio.get_event_loop()
-                result = await loop.run_in_executor(None, lambda: func(**kwargs))
+            async def _executor(**kw):
+                if asyncio.iscoroutinefunction(func):
+                    return await func(**kw)
+                else:
+                    return await asyncio.to_thread(func, **kw)
+
+            result = await self_healing_engine.heal_and_execute(
+                tool_name=tool_name,
+                tool_func=_executor,
+                kwargs=kwargs,
+                task_intent=task_intent
+            )
             return str(result)
         except Exception as e:
-            log.error(f"MCP tool '{tool_name}' failed: {e}")
+            log.error(f"MCP tool '{tool_name}' failed after self-healing: {e}")
             return f"Tool error: {str(e)}"
 
     async def route_action(self, action_type: str, target: str) -> Optional[str]:

@@ -253,6 +253,42 @@ async def execute_action(intent: dict, projects: list = None) -> dict:
             "project_dir": None
         }
 
+    elif action in ["whatsapp", "send_whatsapp", "send_message"]:
+        from jarvis.tools.whatsapp_tool import send_whatsapp_message
+        contact = target
+        message = ""
+        if "|||" in target:
+            contact, message = target.split("|||", 1)
+        elif " to " in target:
+            parts = target.split(" to ", 1)
+            message, contact = parts[0], parts[1]
+        res = send_whatsapp_message(contact.strip(), message.strip())
+        return {
+            "success": res.get("success", False),
+            "confirmation": f"Messaged {contact.strip()} on WhatsApp, sir." if res.get("success") else "Could not dispatch WhatsApp message, sir.",
+            "project_dir": None
+        }
+
+    elif action in ["youtube", "play_youtube"]:
+        from jarvis.tools.youtube_tool import play_youtube_video
+        res = play_youtube_video(target)
+        title = res.get("title", target)
+        return {
+            "success": res.get("success", False),
+            "confirmation": f"Playing '{title}' on YouTube, sir." if res.get("success") else "Could not open YouTube, sir.",
+            "project_dir": None
+        }
+
+    elif action == "plan":
+        from jarvis.core.autonomous_planner import plan_executor
+        steps = plan_executor.decompose(target)
+        res = await plan_executor.execute_plan(steps)
+        return {
+            "success": res.get("success", False),
+            "confirmation": res.get("spoken_confirmation", "Plan executed, sir."),
+            "project_dir": None
+        }
+
     else:
         return {"success": False, "confirmation": "", "project_dir": None}
 

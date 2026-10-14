@@ -11,6 +11,7 @@ export interface VoiceInput {
   stop(): void;
   pause(): void;
   resume(): void;
+  getAnalyser(): AnalyserNode | null;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -19,13 +20,14 @@ declare const webkitSpeechRecognition: any;
 export function createVoiceInput(
   onTranscript: (text: string) => void,
   onError: (msg: string) => void,
-  onBargeIn?: () => void
+  onBargeIn?: () => void,
+  onInterim?: (text: string) => void
 ): VoiceInput {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const SR = (window as any).SpeechRecognition || (typeof webkitSpeechRecognition !== "undefined" ? webkitSpeechRecognition : null);
   if (!SR) {
     onError("Speech recognition not supported in this browser");
-    return { start() {}, stop() {}, pause() {}, resume() {} };
+    return { start() {}, stop() {}, pause() {}, resume() {}, getAnalyser() { return null; } };
   }
 
   const recognition = new SR();
@@ -36,6 +38,35 @@ export function createVoiceInput(
   let shouldListen = false;
   let paused = false;
 
+  let micAudioCtx: AudioContext | null = null;
+  let micAnalyser: AnalyserNode | null = null;
+  let micStream: MediaStream | null = null;
+
+  async function ensureMicStream() {
+    if (micAnalyser) {
+      if (micAudioCtx && micAudioCtx.state === "suspended") {
+        try {
+          await micAudioCtx.resume();
+        } catch {}
+      }
+      return micAnalyser;
+    }
+    try {
+      micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      micAudioCtx = new AudioContext();
+      const source = micAudioCtx.createMediaStreamSource(micStream);
+      micAnalyser = micAudioCtx.createAnalyser();
+      micAnalyser.fftSize = 256;
+      micAnalyser.smoothingTimeConstant = 0.5;
+      source.connect(micAnalyser);
+      // NOTE: Do not connect micAnalyser to micAudioCtx.destination to prevent speaker loopback
+      return micAnalyser;
+    } catch (e) {
+      console.warn("[voice] mic audio stream setup failed:", e);
+      return null;
+    }
+  }
+
   recognition.onresult = (event: any) => {
     let hasInterim = false;
     for (let i = event.resultIndex; i < event.results.length; i++) {
@@ -44,7 +75,10 @@ export function createVoiceInput(
         if (text) onTranscript(text);
       } else {
         const interimText = event.results[i][0].transcript.trim();
-        if (interimText.length > 2) hasInterim = true;
+        if (interimText.length > 2) {
+          hasInterim = true;
+          if (onInterim) onInterim(interimText);
+        }
       }
     }
     
@@ -81,6 +115,7 @@ export function createVoiceInput(
     start() {
       shouldListen = true;
       paused = false;
+      ensureMicStream();
       try {
         recognition.start();
       } catch {
@@ -98,6 +133,9 @@ export function createVoiceInput(
     },
     resume() {
       paused = false;
+      if (micAudioCtx && micAudioCtx.state === "suspended") {
+        micAudioCtx.resume().catch(() => {});
+      }
       if (shouldListen) {
         try {
           recognition.start();
@@ -105,6 +143,9 @@ export function createVoiceInput(
           // Already started
         }
       }
+    },
+    getAnalyser() {
+      return micAnalyser;
     },
   };
 }

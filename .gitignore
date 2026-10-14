@@ -18,6 +18,7 @@ __pycache__/
 data/*.jsonl
 data/active_session.json
 data/.jarvis_output.txt
+jarvis/api/data/*.jsonl
 
 # Certificates
 *.pem
@@ -33,6 +34,8 @@ frontend/.vite/
 .idea/
 .claude/
 .arch/
+.gemini/
+.antigravityignore
 
 # Desktop overlay
 desktop-overlay/node_modules/

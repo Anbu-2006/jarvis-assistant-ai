@@ -6,6 +6,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from jarvis.api.main import app
 
+ACTION_KEYWORDS = {
+    "browse": ["browse", "visit", "search", "open browser", "navigate", "look up", "google"],
+    "run_command": ["run", "execute", "terminal", "command", "powershell"],
+    "open_app": ["open", "launch", "start"],
+    "build": ["build", "create", "make", "generate"],
+}
+
 if __name__ == "__main__":
     import uvicorn
     import argparse

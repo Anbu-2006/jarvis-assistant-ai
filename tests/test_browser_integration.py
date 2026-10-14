@@ -18,7 +18,7 @@ import pytest_asyncio
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from browser import JarvisBrowser, SearchResult, PageContent
+from jarvis.tools.browser import JarvisBrowser, SearchResult, PageContent
 
 
 def _has_network() -> bool:

@@ -29,7 +29,7 @@ except ImportError:
 log = logging.getLogger("jarvis.gui")
 
 # Safety settings
-pyautogui.PAUSE = 0.3
+pyautogui.PAUSE = 0.02
 pyautogui.FAILSAFE = True  # Move mouse to top-left corner to abort
 
 
@@ -185,15 +185,33 @@ class GUIController:
     # ── Volume Control ────────────────────────────────────────────────────
 
     def volume_up(self, steps: int = 5):
-        for _ in range(steps):
-            kb_lib.press_and_release("volume up")
+        try:
+            from pycaw.pycaw import AudioUtilities
+            vol = AudioUtilities.GetSpeakers().EndpointVolume
+            curr = vol.GetMasterVolumeLevelScalar()
+            vol.SetMasterVolumeLevelScalar(min(1.0, curr + 0.02 * steps), None)
+        except Exception:
+            for _ in range(steps):
+                kb_lib.press_and_release("volume up")
 
     def volume_down(self, steps: int = 5):
-        for _ in range(steps):
-            kb_lib.press_and_release("volume down")
+        try:
+            from pycaw.pycaw import AudioUtilities
+            vol = AudioUtilities.GetSpeakers().EndpointVolume
+            curr = vol.GetMasterVolumeLevelScalar()
+            vol.SetMasterVolumeLevelScalar(max(0.0, curr - 0.02 * steps), None)
+        except Exception:
+            for _ in range(steps):
+                kb_lib.press_and_release("volume down")
 
     def volume_mute(self):
-        kb_lib.press_and_release("volume mute")
+        try:
+            from pycaw.pycaw import AudioUtilities
+            vol = AudioUtilities.GetSpeakers().EndpointVolume
+            is_muted = vol.GetMute()
+            vol.SetMute(not is_muted, None)
+        except Exception:
+            kb_lib.press_and_release("volume mute")
 
     # ── System Actions ────────────────────────────────────────────────────
 

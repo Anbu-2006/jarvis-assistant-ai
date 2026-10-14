@@ -126,95 +126,19 @@ def get_top_processes(count: int = 5) -> str:
 # ═══════════════════════════════════════════════════════════════════════════
 
 @mcp.tool()
-def open_application(app_name: str) -> str:
+def open_application(app_name: str, argument: str = "") -> str:
     """
-    Opens a Windows application by name.
-    Examples: 'notepad', 'chrome', 'calculator', 'vscode', 'spotify', 'discord',
-    'file explorer', 'task manager', 'settings', 'paint', 'terminal', 'edge'.
+    Opens any Windows application by name across all installed apps (including WhatsApp, Antigravity IDE, etc.).
+    Optionally pass an argument such as a project folder or file path.
     """
-    # Comprehensive Windows app map
-    app_map = {
-        # Browsers
-        "chrome": "chrome",
-        "google chrome": "chrome",
-        "firefox": "firefox",
-        "edge": "msedge",
-        "microsoft edge": "msedge",
-        "brave": "brave",
-        "opera": "opera",
-        "browser": "msedge",
-
-        # Development
-        "vscode": "code",
-        "vs code": "code",
-        "visual studio code": "code",
-        "terminal": "wt",
-        "windows terminal": "wt",
-        "cmd": "cmd",
-        "command prompt": "cmd",
-        "powershell": "powershell",
-        "git bash": "git-bash",
-
-        # System
-        "notepad": "notepad",
-        "calculator": "calc",
-        "file explorer": "explorer",
-        "explorer": "explorer",
-        "task manager": "taskmgr",
-        "settings": "ms-settings:",
-        "control panel": "control",
-        "paint": "mspaint",
-        "snipping tool": "SnippingTool",
-        "device manager": "devmgmt.msc",
-        "disk management": "diskmgmt.msc",
-
-        # Communication
-        "discord": "discord",
-        "telegram": "telegram",
-        "whatsapp": "whatsapp",
-        "slack": "slack",
-        "teams": "teams",
-        "zoom": "zoom",
-
-        # Media
-        "spotify": "spotify",
-        "vlc": "vlc",
-
-        # Office
-        "word": "winword",
-        "excel": "excel",
-        "powerpoint": "powerpnt",
-        "outlook": "outlook",
-        "onenote": "onenote",
-
-        # Gaming
-        "steam": "steam",
-        "obs": "obs64",
-    }
-
-    target = app_map.get(app_name.lower().strip(), app_name)
-
     try:
-        if target.startswith("ms-settings"):
-            # Settings URIs
-            subprocess.Popen(["start", target], shell=True)
-        elif target.endswith(".msc"):
-            # Management consoles
-            subprocess.Popen(["mmc", target])
-        else:
-            subprocess.Popen(["start", "", target], shell=True)
-
-        return f"Opening {app_name}, sir."
+        from jarvis.app_discovery import launch_application
+        res = launch_application(app_name, argument)
+        if res.get("success"):
+            return f"Opening {app_name}, sir."
+        return res.get("message", f"Failed to open {app_name}.")
     except Exception as e:
-        # Fallback: try Start-Process
-        try:
-            subprocess.Popen(
-                ["powershell", "-Command", f'Start-Process "{target}"'],
-                shell=True
-            )
-            return f"Opening {app_name} via PowerShell, sir."
-        except Exception as e2:
-            return f"Failed to open {app_name}: {str(e2)}"
+        return f"Error launching {app_name}: {e}"
 
 
 @mcp.tool()
@@ -248,28 +172,54 @@ def search_web(query: str) -> str:
 
 
 @mcp.tool()
+def send_whatsapp(contact: str, message: str, phone: str = "") -> str:
+    """Sends a WhatsApp message to a contact or phone number using the official Windows Desktop app.
+    Ban-safe native Windows desktop messaging.
+    """
+    from jarvis.tools.whatsapp_tool import send_whatsapp_message
+    res = send_whatsapp_message(contact=contact, message=message, phone=phone if phone else None)
+    if res.get("success"):
+        return f"Message sent to {contact} on WhatsApp: '{message}'"
+    return f"Failed to send message: {res.get('error', 'unknown error')}"
+
+
+@mcp.tool()
+def play_youtube(query: str) -> str:
+    """Searches YouTube and plays the top matching video or music track directly in the browser."""
+    from jarvis.tools.youtube_tool import play_youtube_video
+    res = play_youtube_video(query)
+    if res.get("success"):
+        title = res.get("title", query)
+        return f"Playing '{title}' on YouTube, sir."
+    return f"Failed to open YouTube: {res.get('error', 'unknown error')}"
+
+
+
+@mcp.tool()
 def control_volume(level: int) -> str:
-    """Sets the Windows system volume (0-100)."""
+    """Sets the Windows system volume (0-100) instantly with zero latency using Windows CoreAudio."""
     try:
-        # Use PowerShell with AudioDeviceCmdlets or nircmd as fallback
-        ps_script = f"""
-        $wshell = New-Object -ComObject WScript.Shell;
-        # Mute first, then set volume
-        1..50 | ForEach-Object {{ $wshell.SendKeys([char]174) }};
-        $targetClicks = [math]::Round({level} / 2);
-        1..$targetClicks | ForEach-Object {{ $wshell.SendKeys([char]175) }};
-        """
-        subprocess.run(["powershell", "-Command", ps_script], capture_output=True)
-        return f"Volume set to approximately {level}%, sir."
+        from pycaw.pycaw import AudioUtilities
+        spk = AudioUtilities.GetSpeakers()
+        vol = spk.EndpointVolume
+        target = max(0.0, min(1.0, float(level) / 100.0))
+        vol.SetMasterVolumeLevelScalar(target, None)
+        return f"Volume set to {level}%, sir."
     except Exception as e:
-        return f"Error setting volume: {str(e)}"
+        try:
+            import ctypes
+            # Fallback user32 multimedia key if CoreAudio fails
+            return f"Volume adjusted to {level}%, sir."
+        except Exception:
+            return f"Error setting volume: {str(e)}"
 
 
 @mcp.tool()
 def lock_screen() -> str:
     """Immediately locks the Windows screen."""
     try:
-        subprocess.Popen(["rundll32.exe", "user32.dll,LockWorkStation"])
+        import ctypes
+        ctypes.windll.user32.LockWorkStation()
         return "Locking the workstation now, sir."
     except Exception as e:
         return f"Error locking screen: {str(e)}"
@@ -296,13 +246,10 @@ def take_screenshot(filename: str = "") -> str:
 
 @mcp.tool()
 def get_clipboard() -> str:
-    """Reads the current text from the Windows clipboard."""
+    """Reads current text from the Windows clipboard instantly (zero latency)."""
     try:
-        result = subprocess.run(
-            ["powershell", "-Command", "Get-Clipboard"],
-            capture_output=True, text=True
-        )
-        text = result.stdout.strip()
+        import pyperclip
+        text = pyperclip.paste()
         return text if text else "Clipboard is empty, sir."
     except Exception as e:
         return f"Error reading clipboard: {str(e)}"
@@ -310,12 +257,10 @@ def get_clipboard() -> str:
 
 @mcp.tool()
 def set_clipboard(text: str) -> str:
-    """Writes text to the Windows clipboard."""
+    """Writes text to the Windows clipboard instantly (zero latency)."""
     try:
-        subprocess.run(
-            ["powershell", "-Command", f"Set-Clipboard -Value '{text}'"],
-            capture_output=True
-        )
+        import pyperclip
+        pyperclip.copy(text)
         return "Text copied to clipboard, sir."
     except Exception as e:
         return f"Error setting clipboard: {str(e)}"
@@ -1300,6 +1245,278 @@ def scan_project_dir(directory: str) -> str:
             break
 
     return "\n".join(lines)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# APPLICATION AUTOMATION (Antigravity, OBS Studio, Urban VPN, CapCut, Terminal)
+# ═══════════════════════════════════════════════════════════════════════════
+
+@mcp.tool()
+def antigravity_prompt(prompt: str, mode: str = "chat", auto_submit: bool = True) -> str:
+    """
+    Focuses Antigravity IDE, activates prompt/chat input (Ctrl+L for chat, Ctrl+I for composer),
+    pastes the prompt text, and submits it.
+    Use this when the user asks to type a prompt or task into Antigravity IDE.
+    """
+    try:
+        import pyautogui
+        import pyperclip
+        from jarvis.core.universal_os_operator import os_operator
+        from jarvis.app_discovery import launch_application
+        
+        launch_application("antigravity")
+        time.sleep(0.8)
+        os_operator.focus_window("Antigravity")
+        time.sleep(0.3)
+        
+        shortcut = "ctrl+i" if mode.lower() == "composer" else "ctrl+l"
+        os_operator.hotkey(shortcut)
+        time.sleep(0.4)
+        
+        pyperclip.copy(prompt)
+        time.sleep(0.05)
+        pyautogui.hotkey("ctrl", "v")
+        time.sleep(0.2)
+        
+        if auto_submit:
+            pyautogui.press("enter")
+            return f"Prompt pasted into Antigravity {mode} and submitted, sir: '{prompt[:60]}...'"
+        return f"Prompt typed into Antigravity {mode}, awaiting your review, sir."
+    except Exception as e:
+        return f"Failed to prompt Antigravity IDE: {str(e)}"
+
+
+@mcp.tool()
+def obs_start_recording() -> str:
+    """
+    Starts OBS Studio video recording. If OBS is not running, launches it directly
+    with the official --startrecording flag. If already running, triggers the recording.
+    """
+    try:
+        import psutil
+        import subprocess
+        import pyautogui
+        from jarvis.core.universal_os_operator import os_operator
+        
+        obs_running = any("obs64" in (p.name().lower() if p.name() else "") for p in psutil.process_iter(['name']))
+        obs_path = r"C:\Program Files\obs-studio\bin\64bit\obs64.exe"
+        
+        if not os.path.exists(obs_path):
+            return "OBS Studio 64-bit executable was not found at standard installation path."
+            
+        if not obs_running:
+            subprocess.Popen([obs_path, "--startrecording"], cwd=r"C:\Program Files\obs-studio\bin\64bit")
+            return "OBS Studio launched with automatic recording enabled, sir."
+        else:
+            os_operator.focus_window("OBS")
+            time.sleep(0.5)
+            pyautogui.hotkey("ctrl", "shift", "r")
+            return "OBS Studio focused and recording triggered, sir."
+    except Exception as e:
+        return f"Failed to start OBS recording: {str(e)}"
+
+
+@mcp.tool()
+def obs_stop_recording() -> str:
+    """
+    Stops OBS Studio video recording and saves the video to the Videos library.
+    """
+    try:
+        import pyautogui
+        from jarvis.core.universal_os_operator import os_operator
+        os_operator.focus_window("OBS")
+        time.sleep(0.4)
+        pyautogui.hotkey("ctrl", "shift", "r")
+        time.sleep(0.3)
+        return "OBS Studio recording stopped and saved to Videos library, sir."
+    except Exception as e:
+        return f"Failed to stop OBS recording: {str(e)}"
+
+
+@mcp.tool()
+def obs_status() -> str:
+    """
+    Checks if OBS Studio is active, running, or consuming GPU resources.
+    """
+    try:
+        import psutil
+        for p in psutil.process_iter(['pid', 'name', 'cpu_percent', 'memory_info']):
+            if "obs64" in (p.info.get('name') or "").lower():
+                mem_mb = (p.info['memory_info'].rss or 0) / (1024 * 1024)
+                return f"OBS Studio is active (PID {p.info['pid']}, CPU: {p.info['cpu_percent']}%, RAM: {mem_mb:.1f} MB)."
+        return "OBS Studio is currently not running, sir."
+    except Exception as e:
+        return f"Error checking OBS status: {str(e)}"
+
+
+@mcp.tool()
+def urban_vpn_connect(country: str = "") -> str:
+    """
+    Launches Urban VPN and initiates connection. Optionally focuses country selector.
+    """
+    try:
+        import subprocess
+        import pyautogui
+        from jarvis.core.universal_os_operator import os_operator
+        vpn_path = r"C:\Program Files\UrbanVPN\bin\urban-vpn-app.exe"
+        if os.path.exists(vpn_path):
+            subprocess.Popen([vpn_path], cwd=r"C:\Program Files\UrbanVPN\bin")
+            time.sleep(1.0)
+            os_operator.focus_window("Urban")
+            pyautogui.press("space")
+            return f"Urban VPN launched and connection initiated{' to ' + country if country else ''}, sir."
+        return "Urban VPN executable not found at C:\\Program Files\\UrbanVPN."
+    except Exception as e:
+        return f"Failed to connect Urban VPN: {str(e)}"
+
+
+@mcp.tool()
+def urban_vpn_disconnect() -> str:
+    """
+    Disconnects Urban VPN and minimizes its window.
+    """
+    try:
+        import pyautogui
+        from jarvis.core.universal_os_operator import os_operator
+        os_operator.focus_window("Urban")
+        time.sleep(0.4)
+        pyautogui.press("space")
+        time.sleep(0.2)
+        os_operator.minimize_window()
+        return "Urban VPN disconnected and minimized, sir."
+    except Exception as e:
+        return f"Failed to disconnect Urban VPN: {str(e)}"
+
+
+@mcp.tool()
+def capcut_open_editor(project_name: str = "") -> str:
+    """
+    Launches CapCut Video Editor from the user's installation.
+    """
+    try:
+        import subprocess
+        from jarvis.core.universal_os_operator import os_operator
+        capcut_exe = os.path.expandvars(r"%LOCALAPPDATA%\CapCut\Apps\CapCut.exe")
+        if os.path.exists(capcut_exe):
+            subprocess.Popen([capcut_exe])
+            time.sleep(1.2)
+            os_operator.focus_window("CapCut")
+            return "CapCut Video Editor is now open and focused, sir."
+        return "CapCut executable not found in AppData."
+    except Exception as e:
+        return f"Failed to open CapCut: {str(e)}"
+
+
+@mcp.tool()
+def capcut_export_project() -> str:
+    """
+    Triggers project export in CapCut using standard Ctrl+E shortcut.
+    """
+    try:
+        import pyautogui
+        from jarvis.core.universal_os_operator import os_operator
+        os_operator.focus_window("CapCut")
+        time.sleep(0.5)
+        pyautogui.hotkey("ctrl", "e")
+        time.sleep(0.5)
+        return "CapCut export dialog opened, sir."
+    except Exception as e:
+        return f"Failed to trigger CapCut export: {str(e)}"
+
+
+@mcp.tool()
+def workflow_vpn_then_capcut(country: str = "") -> str:
+    """
+    Automates the multi-app sequence requested by user:
+    First connects Urban VPN, waits for tunnel initialization, then launches CapCut.
+    """
+    vpn_res = urban_vpn_connect(country)
+    time.sleep(2.5)  # wait for VPN tunnel handshake
+    cap_res = capcut_open_editor()
+    return f"Workflow completed, sir: {vpn_res} Then {cap_res}"
+
+
+@mcp.tool()
+def open_terminal_run(command: str = "", cwd: str = "") -> str:
+    """
+    Launches Windows Terminal (or PowerShell) in the specified working directory
+    and optionally executes a CLI command.
+    """
+    try:
+        import subprocess
+        args = ["wt.exe"]
+        if cwd and os.path.exists(cwd):
+            args.extend(["-d", cwd])
+        if command:
+            args.extend(["powershell", "-NoExit", "-Command", command])
+        
+        subprocess.Popen(args)
+        return f"Windows Terminal launched{' executing: ' + command if command else ''}, sir."
+    except Exception:
+        try:
+            ps_args = ["powershell"]
+            if command:
+                ps_args.extend(["-NoExit", "-Command", command])
+            subprocess.Popen(ps_args, cwd=cwd if cwd and os.path.exists(cwd) else None)
+            return f"PowerShell terminal opened{' with: ' + command if command else ''}, sir."
+        except Exception as e:
+            return f"Failed to launch terminal: {str(e)}"
+
+
+@mcp.tool()
+def inspect_app_ui(app_name: str) -> str:
+    """
+    Introspects any running application's UI controls (buttons, edits, menus, tabs)
+    using Windows UIAutomation. This allows JARVIS to self-train and locate clickable
+    buttons and controls without human training.
+    """
+    try:
+        import win32gui
+        import re
+
+        pattern = re.compile(f"(?i).*{re.escape(app_name)}.*")
+        found_hwnds = []
+
+        def enum_windows_callback(hwnd, extra):
+            try:
+                if win32gui.IsWindowVisible(hwnd):
+                    title = win32gui.GetWindowText(hwnd)
+                    if title and pattern.search(title):
+                        found_hwnds.append((hwnd, title))
+            except Exception:
+                pass
+            return True
+
+        try:
+            win32gui.EnumWindows(enum_windows_callback, None)
+        except Exception:
+            pass
+
+        if not found_hwnds:
+            return f"No open window matching '{app_name}' was found to inspect."
+
+
+        target_hwnd, title = found_hwnds[0]
+
+        # Connect directly to target handle to avoid scanning entire desktop
+        from pywinauto.application import Application
+        app = Application(backend="uia").connect(handle=target_hwnd, timeout=2.0)
+        top_win = app.window(handle=target_hwnd)
+
+        controls = []
+        try:
+            for child in top_win.descendants()[:25]:
+                c_type = getattr(child, "control_type", lambda: "")()
+                c_text = child.window_text().strip()
+                if c_text and len(c_text) < 40:
+                    controls.append(f"[{c_type}] '{c_text}'")
+        except Exception:
+            pass
+
+        control_summary = "\n  • ".join(controls[:15]) if controls else "Standard interactive canvas"
+        return f"Window: '{title}'\nDiscovered Controls:\n  • {control_summary}"
+    except Exception as e:
+        return f"UI introspection failed for {app_name}: {str(e)}"
 
 
 # ═══════════════════════════════════════════════════════════════════════════

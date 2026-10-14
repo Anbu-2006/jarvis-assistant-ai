@@ -17,6 +17,13 @@ from dataclasses import dataclass
 from typing import Optional, AsyncGenerator
 
 import httpx
+from pathlib import Path
+from dotenv import load_dotenv
+
+# Automatically load .env if available
+_env_path = Path(__file__).parents[2] / ".env"
+if _env_path.exists():
+    load_dotenv(_env_path)
 
 log = logging.getLogger("jarvis.llm_router")
 
@@ -84,37 +91,37 @@ class LLMRouter:
     def __init__(self):
         self._providers: list[ProviderState] = []
 
-        # Ollama — Local inference
+        # OpenRouter — Primary Cloud Engine (Frontier Free Models & Zero-Lag Intelligence)
+        openrouter_key = os.getenv("OPENROUTER_API_KEY", "")
+        if openrouter_key:
+            self._providers.append(ProviderState(name="openrouter", priority=0))
+            log.info("✓ OpenRouter registered as PRIMARY engine (Frontier Free Tier)")
+
+        # Ollama — Local inference (only if explicitly enabled)
         ollama_model = os.getenv("OLLAMA_MODEL", "")
-        if ollama_model:
-            self._providers.append(ProviderState(name="ollama", priority=0))
+        if ollama_model and not openrouter_key:
+            self._providers.append(ProviderState(name="ollama", priority=1))
             log.info(f"✓ Ollama registered: {ollama_model} (local primary)")
 
         nvidia_key = os.getenv("NVIDIA_API_KEY", "")
         if nvidia_key and nvidia_key != "your-nvidia-api-key-here":
-            self._providers.append(ProviderState(name="nvidia", priority=1))
-            log.info("✓ DeepSeek V4 Flash registered via NVIDIA NIM (cloud primary)")
+            self._providers.append(ProviderState(name="nvidia", priority=2))
+            log.info("✓ DeepSeek V4 Flash registered via NVIDIA NIM (cloud fallback)")
 
         # Groq — ultra-fast inference (Llama 3.3 70B)
         groq_key = os.getenv("GROQ_API_KEY", "")
         if groq_key and groq_key != "gsk_your_groq_key_here":
-            self._providers.append(ProviderState(name="groq", priority=2))
+            self._providers.append(ProviderState(name="groq", priority=3))
             log.info("✓ Groq registered (Llama 3.3 — fast fallback)")
 
         # Gemini — conversational fallback
         gemini_key = os.getenv("GEMINI_API_KEY", "")
         if gemini_key and gemini_key != "your-gemini-api-key-here":
-            self._providers.append(ProviderState(name="gemini", priority=3))
-            log.info("✓ Gemini 3 Flash registered (conversational fallback)")
-
-        # OpenRouter — last resort
-        openrouter_key = os.getenv("OPENROUTER_API_KEY", "")
-        if openrouter_key:
-            self._providers.append(ProviderState(name="openrouter", priority=4))
-            log.info("✓ OpenRouter registered (last resort)")
+            self._providers.append(ProviderState(name="gemini", priority=4))
+            log.info("✓ Gemini registered (conversational fallback)")
 
         if not self._providers:
-            log.error("No LLM providers configured! Set at least NVIDIA_API_KEY or GROQ_API_KEY in .env")
+            log.error("No LLM providers configured! Set OPENROUTER_API_KEY in .env")
 
         self._providers.sort(key=lambda p: p.priority)
         self._client = None  # AsyncOpenAI for NVIDIA — lazy init
@@ -815,11 +822,27 @@ class LLMRouter:
             raise RuntimeError("OPENROUTER_API_KEY not set")
 
         http = self._get_http_client()
-        MODELS = [
-            "google/gemma-3-27b-it:free",
-            "meta-llama/llama-3.1-8b-instruct:free",
-            "openrouter/auto",
+        primary_chat = os.getenv("OPENROUTER_CHAT_MODEL", "nvidia/nemotron-3-super-120b-a12b:free")
+        fallback_chat = os.getenv("OPENROUTER_FALLBACK_MODEL", "openrouter/free")
+
+        candidate_models = [
+            primary_chat,
+            "nvidia/nemotron-3-super-120b-a12b:free",
+            "nvidia/nemotron-3-ultra-550b-a55b:free",
+            "meta-llama/llama-3.3-70b-instruct:free",
+            "google/gemma-4-26b-a4b-it:free",
+            "google/gemma-4-31b-it:free",
+            "cohere/north-mini-code:free",
+            fallback_chat,
+            "openrouter/free",
         ]
+        # Deduplicate while preserving priority order
+        MODELS = []
+        seen = set()
+        for m in candidate_models:
+            if m and m not in seen:
+                seen.add(m)
+                MODELS.append(m)
 
         for model in MODELS:
             try:

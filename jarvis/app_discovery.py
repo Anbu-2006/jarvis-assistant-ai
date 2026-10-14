@@ -22,13 +22,31 @@ from pathlib import Path
 
 log = logging.getLogger("jarvis.app_discovery")
 
+_DISCOVERED_APPS_CACHE: dict[str, str] = {}
+
+try:
+    import win32com.client
+    _wshell = win32com.client.Dispatch("WScript.Shell")
+except Exception:
+    _wshell = None
+
+
 def _resolve_lnk(lnk_path: str) -> str | None:
-    """Resolve a .lnk shortcut to its target path using PowerShell."""
+    """Resolve a .lnk shortcut to its target path using WScript.Shell (or fallback to PowerShell)."""
+    global _wshell
+    if _wshell:
+        try:
+            target = _wshell.CreateShortcut(lnk_path).TargetPath
+            if target and os.path.isfile(target):
+                return target
+        except Exception:
+            pass
+
     try:
         result = subprocess.run(
             ["powershell", "-NoProfile", "-Command",
              f"(New-Object -ComObject WScript.Shell).CreateShortcut('{lnk_path}').TargetPath"],
-            capture_output=True, text=True, timeout=5
+            capture_output=True, text=True, timeout=2
         )
         target = result.stdout.strip()
         if target and os.path.isfile(target):
@@ -169,11 +187,15 @@ def scan_uwp_apps() -> dict[str, str]:
     return apps
 
 
-def discover_all_apps() -> dict[str, str]:
-    """Run all scanners and merge results.
+def discover_all_apps(force_refresh: bool = False) -> dict[str, str]:
+    """Run all scanners and merge results (cached in-memory for zero latency).
     
     Returns a deduplicated dict of {app_name: executable_path}.
     """
+    global _DISCOVERED_APPS_CACHE
+    if _DISCOVERED_APPS_CACHE and not force_refresh:
+        return _DISCOVERED_APPS_CACHE
+
     all_apps = {}
     
     # Priority order: Start Menu > Registry > Common dirs > UWP
@@ -200,6 +222,44 @@ def discover_all_apps() -> dict[str, str]:
         if path:
             all_apps[tool] = path
     
+    # Ensure key productivity apps and aliases are explicitly registered
+    antigravity_path = os.path.expandvars(r"%LOCALAPPDATA%\Programs\Antigravity IDE\Antigravity IDE.exe")
+    if os.path.isfile(antigravity_path):
+        all_apps["antigravity"] = antigravity_path
+        all_apps["antigravity ide"] = antigravity_path
+
+    # Standard Windows Utilities
+    for win_tool, win_exe in [
+        ("notepad", "notepad.exe"),
+        ("calculator", "calc.exe"),
+        ("paint", "mspaint.exe"),
+        ("explorer", "explorer.exe"),
+        ("file explorer", "explorer.exe"),
+        ("task manager", "taskmgr.exe"),
+        ("taskmgr", "taskmgr.exe"),
+        ("terminal", "wt.exe"),
+        ("windows terminal", "wt.exe"),
+        ("cmd", "cmd.exe"),
+        ("command prompt", "cmd.exe"),
+        ("powershell", "powershell.exe"),
+        ("chrome", "chrome.exe"),
+        ("google chrome", "chrome.exe"),
+        ("edge", "msedge.exe"),
+        ("microsoft edge", "msedge.exe"),
+        ("vs code", "code.exe"),
+        ("visual studio code", "code.exe"),
+        ("obs", "obs64.exe"),
+        ("obs studio", "obs64.exe"),
+    ]:
+        resolved = shutil.which(win_exe)
+        if resolved:
+            all_apps[win_tool] = resolved
+        elif win_tool not in all_apps:
+            all_apps[win_tool] = win_exe
+
+    # Windows Store WhatsApp
+    all_apps["whatsapp"] = r"shell:AppsFolder\5319275A.WhatsAppDesktop_cv1g1gvanyjgm!App"
+
     # Clean up names
     cleaned = {}
     for name, path in all_apps.items():
@@ -210,7 +270,66 @@ def discover_all_apps() -> dict[str, str]:
             continue
         cleaned[clean_name] = path
     
-    return dict(sorted(cleaned.items()))
+    _DISCOVERED_APPS_CACHE = dict(sorted(cleaned.items()))
+    return _DISCOVERED_APPS_CACHE
+
+
+def launch_application(app_name: str, argument: str = "") -> dict:
+    """Launch an application by its name or alias, optionally passing an argument (e.g. folder or URL)."""
+    clean = app_name.strip().lower()
+    # Guard against generic filler words
+    INVALID_TARGETS = {
+        "this", "that", "it", "something", "an app", "program", "app",
+        "do", "do this", "do that", "things", "thing", "random", "anything", "application"
+    }
+    if clean in INVALID_TARGETS or len(clean) < 2:
+        log.warning(f"Refusing to launch generic target or filler token: '{app_name}'")
+        return {"success": False, "message": f"'{app_name}' is not a valid application name."}
+
+    app_map = discover_all_apps()
+    # Direct match or exact token match
+    target_path = app_map.get(clean)
+    if not target_path and len(clean) >= 3:
+        for name, path in app_map.items():
+            if clean == name or re.search(r'\b' + re.escape(clean) + r'\b', name):
+                target_path = path
+                break
+
+    if not target_path:
+        # Fallback to system protocol or PATH
+        if clean == "whatsapp":
+            target_path = "whatsapp:"
+        else:
+            which_path = shutil.which(clean)
+            if which_path:
+                target_path = which_path
+
+    if not target_path:
+        log.warning(f"Application '{app_name}' not found on system.")
+        return {"success": False, "message": f"Application '{app_name}' was not found on your PC."}
+
+    log.info(f"Launching '{app_name}' via: {target_path} (arg: {argument})")
+
+    try:
+        if target_path.startswith("shell:") or target_path.endswith(":"):
+            # UWP app or protocol
+            cmd = f'start "" "{target_path}"'
+            subprocess.Popen(cmd, shell=True)
+            return {"success": True, "message": f"{app_name.title()} launched."}
+        
+        elif argument and os.path.exists(argument):
+            # Launch executable with folder/file path
+            subprocess.Popen([target_path, argument])
+            return {"success": True, "message": f"Opened in {app_name.title()}."}
+        elif argument:
+            subprocess.Popen([target_path, argument])
+            return {"success": True, "message": f"{app_name.title()} launched."}
+        else:
+            os.startfile(target_path)
+            return {"success": True, "message": f"{app_name.title()} opened."}
+    except Exception as e:
+        log.error(f"Failed to launch {app_name}: {e}")
+        return {"success": False, "message": f"Error opening {app_name}: {e}"}
 
 
 def save_app_map(output_path: str = None):
@@ -232,11 +351,6 @@ def save_app_map(output_path: str = None):
     print(f"  Saved to: {output_path}")
     print(f"{'='*60}")
     
-    # Show top 30
-    print("\nTop 30 apps found:")
-    for i, (name, path) in enumerate(list(apps.items())[:30], 1):
-        print(f"  {i:2}. {name:30s} → {path[:60]}")
-    
     return apps
 
 
@@ -244,3 +358,4 @@ if __name__ == "__main__":
     import sys
     sys.stdout.reconfigure(encoding="utf-8")
     apps = save_app_map()
+
